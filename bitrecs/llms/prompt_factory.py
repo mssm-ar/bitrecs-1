@@ -108,14 +108,17 @@ class PromptFactory:
         season = self.season
         persona_data = self.PERSONAS[self.persona]
 
-        # SMART PROMPT - Quality + Speed with context-aware optimization
-        # Use detailed prompt if context is small, concise if large
+        # ENHANCED CONTENT QUALITY PROMPT - Context-aware optimization with quality focus
         context_length = len(self.context)
         cart_length = len(self.cart_json)
         
+        # Analyze context for better recommendations
+        context_analysis = self._analyze_context()
+        seasonal_guidance = self._get_seasonal_guidance()
+        
         if context_length < 5000 and cart_length < 1000:
-            # DETAILED PROMPT for small contexts (better quality)
-            prompt = f"""# E-COMMERCE RECOMMENDATION TASK
+            # DETAILED PROMPT for small contexts (maximum quality)
+            prompt = f"""# E-COMMERCE RECOMMENDATION TASK - CONTENT QUALITY FOCUS
 
 You are a {self.persona} with expertise in {persona_data['description'][:100]}.
 Your core values: {', '.join(persona_data['priorities'])}
@@ -127,23 +130,35 @@ CURRENT CART: {self.cart_json}
 
 AVAILABLE PRODUCTS: {self.context}
 
+CONTEXT ANALYSIS: {context_analysis}
+
+SEASONAL GUIDANCE: {seasonal_guidance}
+
 TASK: Recommend EXACTLY {self.num_recs} complementary products that:
-- Match query product's category and gender
-- Increase average order value and conversion
-- Consider seasonal relevance and user preferences
+- Match query product's category and gender (CRITICAL)
+- Provide detailed, specific reasoning for each recommendation
+- Consider seasonal relevance and current trends
+- Increase average order value and conversion potential
 - Avoid duplicates and the query product itself
 - Are ordered by relevance (best first)
+
+REASONING REQUIREMENTS:
+- Each reason must be specific and detailed (20+ words)
+- Explain WHY the product complements the query item
+- Mention category/gender matching
+- Include seasonal relevance if applicable
+- Consider price point and value proposition
 
 CRITICAL REQUIREMENTS:
 - Return ONLY valid JSON array with EXACTLY {self.num_recs} items
 - Each item: {{"sku": "...", "name": "...", "price": "...", "reason": "..."}}
 - SKU must exist in products list (case-sensitive match)
 - No duplicates, no query SKU, use double quotes only
-- Reason should explain why it's a good recommendation
+- Reason must be detailed and specific (not generic)
 
-Example: [{{"sku": "ABC123", "name": "Product Name", "price": "29.99", "reason": "Perfect complement for user needs"}}]"""
+Example: [{{"sku": "ABC123", "name": "Premium Winter Jacket", "price": "89.99", "reason": "Perfect complement to the winter boots - same seasonal category, premium quality that matches the customer's style, ideal for cold weather layering and completes the winter outfit ensemble"}}]"""
         else:
-            # CONCISE PROMPT for large contexts (faster processing)
+            # CONCISE PROMPT for large contexts (optimized quality)
             prompt = f"""You are a {self.persona} recommending {self.num_recs} {self.engine_mode} products for SKU {self.sku} ({self.sku_info}).
 
 PERSONA: {persona_data['description'][:80]}...
@@ -153,11 +168,20 @@ CART: {self.cart_json}
 
 PRODUCTS: {self.context}
 
+SEASONAL GUIDANCE: {seasonal_guidance}
+
 TASK: Select {self.num_recs} complementary products that:
-- Match the query product's category/gender
-- Increase order value and conversion
+- Match the query product's category/gender (CRITICAL)
+- Provide specific reasoning for each recommendation
 - Are relevant to current season ({self.season})
+- Increase order value and conversion
 - Avoid duplicates and query product
+
+REASONING REQUIREMENTS:
+- Each reason must be specific (15+ words)
+- Explain WHY it complements the query item
+- Mention category/gender matching
+- Include seasonal relevance if applicable
 
 OUTPUT FORMAT:
 - Return ONLY valid JSON array with EXACTLY {self.num_recs} items
@@ -182,6 +206,103 @@ Example: [{{"sku": "ABC123", "name": "Product Name", "price": "29.99", "reason":
             #print(prompt)
 
         return prompt
+
+    def _analyze_context(self) -> str:
+        """Analyze the product context to provide better recommendations"""
+        try:
+            import json
+            products = json.loads(self.context)
+            
+            if not products or len(products) == 0:
+                return "No products available for analysis"
+            
+            # Analyze product categories and patterns
+            categories = []
+            genders = []
+            price_ranges = []
+            
+            for product in products[:50]:  # Analyze first 50 products for speed
+                name = str(product.get('name', '')).lower()
+                price = product.get('price', '0')
+                
+                # Extract category information
+                if any(word in name for word in ['shirt', 'top', 'blouse', 'tank']):
+                    categories.append('tops')
+                elif any(word in name for word in ['pants', 'jeans', 'trousers', 'shorts']):
+                    categories.append('bottoms')
+                elif any(word in name for word in ['shoes', 'boots', 'sneakers', 'sandals']):
+                    categories.append('footwear')
+                elif any(word in name for word in ['jacket', 'coat', 'blazer', 'cardigan']):
+                    categories.append('outerwear')
+                elif any(word in name for word in ['dress', 'skirt', 'romper']):
+                    categories.append('dresses')
+                
+                # Extract gender information
+                if any(word in name for word in ['men', 'male', 'mens', 'guy']):
+                    genders.append('men')
+                elif any(word in name for word in ['women', 'female', 'womens', 'lady', 'girl']):
+                    genders.append('women')
+                elif any(word in name for word in ['unisex', 'unisex']):
+                    genders.append('unisex')
+                
+                # Analyze price ranges
+                try:
+                    price_val = float(str(price).replace('$', '').replace(',', ''))
+                    if price_val < 25:
+                        price_ranges.append('budget')
+                    elif price_val < 75:
+                        price_ranges.append('mid-range')
+                    else:
+                        price_ranges.append('premium')
+                except:
+                    pass
+            
+            # Generate analysis summary
+            from collections import Counter
+            top_categories = Counter(categories).most_common(3)
+            top_genders = Counter(genders).most_common(2)
+            top_price_ranges = Counter(price_ranges).most_common(2)
+            
+            analysis_parts = []
+            if top_categories:
+                analysis_parts.append(f"Main categories: {', '.join([cat[0] for cat in top_categories])}")
+            if top_genders:
+                analysis_parts.append(f"Target gender: {', '.join([gen[0] for gen in top_genders])}")
+            if top_price_ranges:
+                analysis_parts.append(f"Price range: {', '.join([pr[0] for pr in top_price_ranges])}")
+            
+            return "; ".join(analysis_parts) if analysis_parts else "Mixed product categories available"
+            
+        except Exception as e:
+            bt.logging.warning(f"Context analysis failed: {e}")
+            return "Context analysis unavailable"
+
+    def _get_seasonal_guidance(self) -> str:
+        """Provide seasonal guidance for better recommendations"""
+        try:
+            from datetime import datetime
+            current_month = datetime.now().month
+            
+            seasonal_guidance = {
+                12: "Winter season - focus on warm clothing, layering pieces, holiday styles",
+                1: "Winter season - focus on warm clothing, layering pieces, new year styles", 
+                2: "Winter season - focus on warm clothing, layering pieces, valentine's styles",
+                3: "Spring transition - focus on light layers, transitional pieces, fresh colors",
+                4: "Spring season - focus on light clothing, pastels, floral patterns",
+                5: "Spring season - focus on light clothing, pastels, floral patterns",
+                6: "Summer season - focus on lightweight fabrics, bright colors, beach styles",
+                7: "Summer season - focus on lightweight fabrics, bright colors, vacation styles",
+                8: "Summer season - focus on lightweight fabrics, bright colors, back-to-school",
+                9: "Fall transition - focus on layering pieces, earth tones, transitional styles",
+                10: "Fall season - focus on warm layers, earth tones, cozy styles",
+                11: "Fall season - focus on warm layers, earth tones, holiday preparation"
+            }
+            
+            return seasonal_guidance.get(current_month, f"Current season: {self.season}")
+            
+        except Exception as e:
+            bt.logging.warning(f"Seasonal guidance failed: {e}")
+            return f"Current season: {self.season}"
     
     
     @staticmethod

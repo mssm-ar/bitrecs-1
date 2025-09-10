@@ -135,28 +135,163 @@ async def do_work(user_prompt: str,
             bt.logging.error("No valid recommendations parsed from LLM response")
             return []
         
-        # Additional validation for parsed results with quality checks
+        # Enhanced content quality validation for parsed results
         valid_recs = []
         for rec in parsed_recs:
             if isinstance(rec, dict) and all(key in rec for key in ['sku', 'name', 'price', 'reason']):
-                # Quality validation: Check if reason is meaningful
+                # Enhanced quality validation
                 reason = str(rec.get('reason', '')).strip()
-                if len(reason) > 10 and not reason.lower().startswith('good'):
-                    valid_recs.append(rec)
+                name = str(rec.get('name', '')).strip()
+                
+                # Check reason quality (must be detailed and specific)
+                if (len(reason) > 15 and 
+                    not reason.lower().startswith('good') and
+                    not reason.lower().startswith('nice') and
+                    not reason.lower().startswith('great') and
+                    len(reason.split()) > 3):  # Must have multiple words
+                    
+                    # Check for category/gender relevance in reason
+                    reason_lower = reason.lower()
+                    has_category_context = any(word in reason_lower for word in [
+                        'complement', 'match', 'pair', 'style', 'category', 'season', 'seasonal',
+                        'winter', 'summer', 'spring', 'fall', 'men', 'women', 'unisex'
+                    ])
+                    
+                    if has_category_context:
+                        valid_recs.append(rec)
+                        bt.logging.trace(f"High quality recommendation: {name[:50]}... - {reason[:100]}...")
+                    else:
+                        bt.logging.warning(f"Reason lacks category context: {reason}")
                 else:
-                    bt.logging.warning(f"Low quality reason: {reason}")
+                    bt.logging.warning(f"Low quality reason (too short/generic): {reason}")
             else:
                 bt.logging.warning(f"Invalid recommendation format: {rec}")
         
         if len(valid_recs) == 0:
-            bt.logging.error("No valid recommendations after quality validation")
+            bt.logging.error("No valid recommendations after content quality validation")
             return []
         
-        bt.logging.info(f"Quality validation passed: {len(valid_recs)} high-quality recommendations")
+        bt.logging.info(f"Content quality validation passed: {len(valid_recs)} high-quality recommendations")
         return valid_recs
     except Exception as e:
         bt.logging.error(f"Error in do_work: {e}")
         return []
+
+
+def validate_content_quality(recommendations: List[dict], query_sku: str, context: str) -> List[dict]:
+    """
+    Validate content quality of recommendations including relevance, reasoning, and category matching.
+    """
+    try:
+        if not recommendations:
+            return []
+        
+        # Parse context to understand available products
+        catalog_products = ProductFactory.try_parse_context_strict(context)
+        valid_skus = {product.sku.lower() for product in catalog_products}
+        
+        quality_recs = []
+        query_lower = query_sku.lower().strip()
+        
+        for rec in recommendations:
+            if not isinstance(rec, dict):
+                continue
+                
+            sku = str(rec.get('sku', '')).strip()
+            name = str(rec.get('name', '')).strip()
+            reason = str(rec.get('reason', '')).strip()
+            price = str(rec.get('price', '')).strip()
+            
+            # Basic validation
+            if not all([sku, name, reason, price]):
+                bt.logging.warning(f"Missing required fields in recommendation: {rec}")
+                continue
+            
+            # SKU validation
+            if sku.lower() not in valid_skus:
+                bt.logging.warning(f"SKU not found in catalog: {sku}")
+                continue
+            
+            # Avoid query product
+            if sku.lower() == query_lower:
+                bt.logging.warning(f"Cannot recommend query product: {sku}")
+                continue
+            
+            # Content quality checks
+            if not _is_high_quality_reason(reason):
+                bt.logging.warning(f"Low quality reason: {reason}")
+                continue
+            
+            # Category relevance check
+            if not _has_category_relevance(name, reason, query_sku):
+                bt.logging.warning(f"Lacks category relevance: {name}")
+                continue
+            
+            quality_recs.append(rec)
+            bt.logging.trace(f"Quality recommendation validated: {name[:30]}...")
+        
+        bt.logging.info(f"Content quality validation: {len(quality_recs)}/{len(recommendations)} recommendations passed")
+        return quality_recs
+        
+    except Exception as e:
+        bt.logging.error(f"Content quality validation error: {e}")
+        return recommendations  # Return original if validation fails
+
+
+def _is_high_quality_reason(reason: str) -> bool:
+    """Check if reason is high quality and detailed"""
+    if not reason or len(reason.strip()) < 15:
+        return False
+    
+    reason_lower = reason.lower().strip()
+    
+    # Avoid generic reasons
+    generic_starters = ['good', 'nice', 'great', 'awesome', 'perfect', 'excellent']
+    if any(reason_lower.startswith(starter) for starter in generic_starters):
+        return False
+    
+    # Must have multiple words
+    if len(reason.split()) < 4:
+        return False
+    
+    # Must contain contextual information
+    context_words = [
+        'complement', 'match', 'pair', 'style', 'category', 'season', 'seasonal',
+        'winter', 'summer', 'spring', 'fall', 'men', 'women', 'unisex', 'fabric',
+        'color', 'design', 'fit', 'occasion', 'outfit', 'ensemble', 'layering'
+    ]
+    
+    return any(word in reason_lower for word in context_words)
+
+
+def _has_category_relevance(name: str, reason: str, query_sku: str) -> bool:
+    """Check if recommendation has category relevance to query"""
+    try:
+        name_lower = name.lower()
+        reason_lower = reason.lower()
+        
+        # Extract category keywords from name
+        category_keywords = {
+            'tops': ['shirt', 'top', 'blouse', 'tank', 'tee', 'sweater'],
+            'bottoms': ['pants', 'jeans', 'trousers', 'shorts', 'skirt'],
+            'footwear': ['shoes', 'boots', 'sneakers', 'sandals', 'heels'],
+            'outerwear': ['jacket', 'coat', 'blazer', 'cardigan', 'hoodie'],
+            'dresses': ['dress', 'romper', 'jumpsuit']
+        }
+        
+        # Check if reason mentions category matching
+        category_mentions = any(
+            keyword in reason_lower for keyword in [
+                'complement', 'match', 'pair', 'same category', 'similar style',
+                'coordinating', 'matching', 'goes with', 'works with'
+            ]
+        )
+        
+        return category_mentions
+        
+    except Exception as e:
+        bt.logging.warning(f"Category relevance check failed: {e}")
+        return True  # Default to allowing if check fails
 
 
 class Miner(BaseMinerNeuron):
@@ -294,14 +429,21 @@ class Miner(BaseMinerNeuron):
             bt.logging.error(f"Failed to parse catalog: {e}")
             valid_skus = set()
 
+        # CONTENT QUALITY: Apply enhanced content quality validation
+        bt.logging.info(f"CONTENT QUALITY: Validating {len(results)} recommendations")
+        quality_results = validate_content_quality(results, query, context)
+        
+        if len(quality_results) < num_recs:
+            bt.logging.warning(f"Content quality validation reduced recommendations from {len(results)} to {len(quality_results)}")
+        
         # SPEED OPTIMIZATION: Fast validation with timeout checks
-        bt.logging.info(f"SPEED VALIDATION: Processing {len(results)} items")
+        bt.logging.info(f"SPEED VALIDATION: Processing {len(quality_results)} quality items")
         final_results = []
         seen_skus = set()
         query_sku_lower = query.lower().strip()
         
         # Process items with timeout protection
-        for i, item in enumerate(results):
+        for i, item in enumerate(quality_results):
             # Check timeout every 10 items
             if i % 10 == 0 and time.time() - st > timeout_threshold:
                 bt.logging.error(f"TIMEOUT: Processing item {i} - approaching limit")
