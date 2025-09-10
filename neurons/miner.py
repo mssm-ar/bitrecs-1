@@ -285,55 +285,88 @@ class Miner(BaseMinerNeuron):
             bt.logging.error(f"Failed to parse catalog: {e}")
             valid_skus = set()
 
-        # Do comprehensive cleanup and validation
+        # STEP 1: VALID JSON FORMAT - Ensure proper JSON array structure
+        bt.logging.info(f"STEP 1: Validating JSON format for {len(results)} items")
         final_results = []
         seen_skus = set()
         query_sku_lower = query.lower().strip()
         
-        for item in results:
+        for i, item in enumerate(results):
             try:
-                # Handle both dict and string inputs
+                # Handle both dict and string inputs with robust JSON validation
                 if isinstance(item, dict):
                     dictionary_item = item.copy()
+                    bt.logging.trace(f"Item {i}: Already a dict, validating structure")
                 else:
-                    item_str = str(item)
+                    item_str = str(item).strip()
+                    bt.logging.trace(f"Item {i}: Parsing string: {item_str[:100]}...")
+                    
+                    # Try multiple JSON parsing strategies
+                    dictionary_item = None
+                    
+                    # Strategy 1: Direct JSON parsing
                     try:
                         dictionary_item = json.loads(item_str)
+                        bt.logging.trace(f"Item {i}: Direct JSON parsing successful")
                     except json.JSONDecodeError:
+                        # Strategy 2: JSON repair
                         try:
                             repaired = json_repair.repair_json(item_str)
                             dictionary_item = json.loads(repaired)
+                            bt.logging.trace(f"Item {i}: JSON repair successful")
                         except Exception as repair_error:
-                            bt.logging.error(f"Failed to repair JSON: {repair_error}, item: {item_str}")
-                            continue
+                            bt.logging.warning(f"Item {i}: JSON repair failed: {repair_error}")
+                            
+                            # Strategy 3: Extract JSON from text
+                            try:
+                                # Look for JSON array patterns
+                                import re
+                                json_pattern = r'\{[^{}]*"sku"[^{}]*\}'
+                                matches = re.findall(json_pattern, item_str)
+                                if matches:
+                                    dictionary_item = json.loads(matches[0])
+                                    bt.logging.trace(f"Item {i}: Pattern extraction successful")
+                            except Exception as pattern_error:
+                                bt.logging.error(f"Item {i}: All JSON parsing strategies failed: {pattern_error}")
+                                continue
+                    
+                    if dictionary_item is None:
+                        bt.logging.error(f"Item {i}: Could not parse as valid JSON: {item_str}")
+                        continue
+                
+                # STEP 2: CORRECT NUMBER OF RECOMMENDATIONS - Validate structure first
+                bt.logging.trace(f"Item {i}: Validating required fields")
                 
                 # Validate required fields exist and are not empty
                 required_fields = ['sku', 'name', 'price', 'reason']
+                missing_fields = []
                 for field in required_fields:
                     if field not in dictionary_item or not dictionary_item[field]:
-                        bt.logging.error(f"Item missing or empty '{field}' key: {dictionary_item}")
-                        continue
+                        missing_fields.append(field)
                 
-                # Get and validate SKU
-                sku = str(dictionary_item["sku"]).strip()
-                if not sku:
-                    bt.logging.error(f"Empty SKU in item: {dictionary_item}")
+                if missing_fields:
+                    bt.logging.error(f"Item {i}: Missing or empty fields {missing_fields}: {dictionary_item}")
                     continue
                 
-                # Check for duplicate SKUs
+                # STEP 3: UNIQUE PRODUCTS - Check for duplicates
+                sku = str(dictionary_item["sku"]).strip()
+                if not sku:
+                    bt.logging.error(f"Item {i}: Empty SKU: {dictionary_item}")
+                    continue
+                
                 if sku in seen_skus:
-                    bt.logging.error(f"Duplicate SKU found: {sku}")
+                    bt.logging.error(f"Item {i}: Duplicate SKU found: {sku}")
                     continue
                 seen_skus.add(sku)
                 
-                # Check if recommending the query product itself
+                # STEP 4: NO QUERY PRODUCT - Exclude viewed product
                 if sku.lower() == query_sku_lower:
-                    bt.logging.error(f"Cannot recommend query product itself: {sku}")
+                    bt.logging.error(f"Item {i}: Cannot recommend query product itself: {sku}")
                     continue
                 
-                # Validate SKU exists in catalog (case-insensitive)
+                # STEP 5: VALID SKUs - Ensure all exist in catalog
                 if valid_skus and sku.lower() not in valid_skus:
-                    bt.logging.error(f"SKU not found in catalog: {sku}")
+                    bt.logging.error(f"Item {i}: SKU not found in catalog: {sku}")
                     continue
                 
                 # Clean up the data using regex patterns
@@ -344,37 +377,97 @@ class Miner(BaseMinerNeuron):
                 
                 # Ensure cleaned fields are not empty
                 if not dictionary_item["name"] or not dictionary_item["reason"]:
-                    bt.logging.error(f"Empty name or reason after cleaning: {dictionary_item}")
+                    bt.logging.error(f"Item {i}: Empty name or reason after cleaning: {dictionary_item}")
                     continue
                 
-                # Create properly formatted JSON
-                recommendation = json.dumps(dictionary_item, separators=(',', ':'))
-                final_results.append(recommendation)
+                # Create properly formatted JSON with validation
+                try:
+                    recommendation = json.dumps(dictionary_item, separators=(',', ':'))
+                    # Validate the JSON can be parsed back
+                    json.loads(recommendation)
+                    final_results.append(recommendation)
+                    bt.logging.trace(f"Item {i}: Successfully added recommendation for SKU {sku}")
+                except Exception as json_error:
+                    bt.logging.error(f"Item {i}: Failed to create valid JSON: {json_error}")
+                    continue
                 
             except Exception as e:
-                bt.logging.error(f"Failed to process item: {item}, error: {e}")
+                bt.logging.error(f"Item {i}: Failed to process: {item}, error: {e}")
                 continue
 
-        # Critical validation: Must have exactly the requested number of results
+        # STEP 6: FINAL VALIDATION - Ensure exact count match
+        bt.logging.info(f"STEP 6: Final validation - Expected {num_recs}, got {len(final_results)}")
+        
         if len(final_results) != num_recs:
             bt.logging.error(f"CRITICAL: Expected {num_recs} results, but got {len(final_results)}")
-            # Return empty response to avoid 0.0 reward for wrong count
-            return BitrecsRequest(
-                name=synapse.name,
-                axon=synapse.axon,
-                dendrite=synapse.dendrite,
-                created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-                user="",
-                num_results=0,
-                query=synapse.query,
-                context="[]",
-                site_key=synapse.site_key,
-                results=[],
-                models_used=[self.model],
-                miner_uid=str(self.uid),
-                miner_hotkey=self.wallet.hotkey.ss58_address,
-                miner_signature=""
-            )
+            
+            # If we have too few results, try to generate more from remaining valid items
+            if len(final_results) < num_recs and len(results) > len(final_results):
+                bt.logging.info(f"Attempting to generate additional recommendations from remaining items")
+                
+                # Get remaining valid items that weren't used
+                used_skus = {json.loads(item)["sku"] for item in final_results}
+                remaining_items = []
+                
+                for item in results:
+                    try:
+                        if isinstance(item, dict):
+                            item_dict = item
+                        else:
+                            item_dict = json.loads(str(item))
+                        
+                        sku = str(item_dict.get("sku", "")).strip()
+                        if (sku and sku not in used_skus and 
+                            sku.lower() != query_sku_lower and
+                            (not valid_skus or sku.lower() in valid_skus)):
+                            
+                            # Clean and validate the item
+                            if all(field in item_dict for field in ['sku', 'name', 'price', 'reason']):
+                                item_dict["name"] = CONST.RE_PRODUCT_NAME.sub("", str(item_dict["name"])).strip()
+                                item_dict["reason"] = CONST.RE_REASON.sub("", str(item_dict["reason"])).strip()
+                                item_dict["price"] = str(item_dict["price"]).strip()
+                                item_dict["sku"] = sku
+                                
+                                if item_dict["name"] and item_dict["reason"]:
+                                    remaining_items.append(item_dict)
+                                    used_skus.add(sku)
+                                    
+                                    if len(final_results) + len(remaining_items) >= num_recs:
+                                        break
+                    except Exception as e:
+                        bt.logging.warning(f"Failed to process remaining item: {e}")
+                        continue
+                
+                # Add remaining items to reach target count
+                for item_dict in remaining_items[:num_recs - len(final_results)]:
+                    try:
+                        recommendation = json.dumps(item_dict, separators=(',', ':'))
+                        final_results.append(recommendation)
+                        bt.logging.info(f"Added fallback recommendation for SKU {item_dict['sku']}")
+                    except Exception as e:
+                        bt.logging.error(f"Failed to add fallback item: {e}")
+            
+            # Final check - if still not enough, return empty to avoid 0.0 reward
+            if len(final_results) != num_recs:
+                bt.logging.error(f"FINAL FAILURE: Could not generate {num_recs} valid recommendations")
+                return BitrecsRequest(
+                    name=synapse.name,
+                    axon=synapse.axon,
+                    dendrite=synapse.dendrite,
+                    created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+                    user="",
+                    num_results=0,
+                    query=synapse.query,
+                    context="[]",
+                    site_key=synapse.site_key,
+                    results=[],
+                    models_used=[self.model],
+                    miner_uid=str(self.uid),
+                    miner_hotkey=self.wallet.hotkey.ss58_address,
+                    miner_signature=""
+                )
+        
+        bt.logging.info(f"SUCCESS: Generated exactly {len(final_results)} valid recommendations")
       
         # Create the final response with proper validation
         utc_now = datetime.now(timezone.utc)

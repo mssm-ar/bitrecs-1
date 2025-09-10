@@ -158,28 +158,28 @@ class PromptFactory:
     {self.context}
     </context>   
 
-    # CRITICAL OUTPUT REQUIREMENTS
-    - Return ONLY a valid JSON array with exactly {self.num_recs} items.
-    - NO Python dictionary syntax (no single quotes).
-    - NO explanations, text, or formatting outside the JSON array.
+    # CRITICAL OUTPUT REQUIREMENTS - FOLLOW EXACTLY FOR MAXIMUM REWARD
+    - Return ONLY a valid JSON array with EXACTLY {self.num_recs} items - no more, no less
+    - NO Python dictionary syntax (no single quotes) - use double quotes only
+    - NO explanations, text, or formatting outside the JSON array
     - Each item must be valid JSON with EXACTLY these fields: "sku", "name", "price", "reason"
-    - All field values must be strings (use double quotes).
-    - SKU must be EXACTLY as it appears in the context (case-sensitive).
-    - Name and reason must contain only letters, numbers, and spaces (no special characters).
-    - Price must be a valid number as a string.
-    - If the Query SKU product is gendered, recommend products that match the gender.
-    - If the Query SKU is gender neutral, recommend gender neutral products.
-    - Never mix gendered products (e.g., if viewing women's shoes, don't recommend men's shoes).
-    - Do not conflate pet products with baby products.
-    - Must return EXACTLY {self.num_recs} items - no more, no less.
-    - Return items MUST exist in the provided context.
-    - Return items must NOT exist in the cart.
-    - NO duplicates - each SKU must be unique.
-    - Product matching Query SKU must NOT be included in recommendations.
-    - Return items ordered by relevance (best recommendation first).
-    - Each reason must be a single sentence explaining why the product is a good recommendation.
-    - Reason should use only plain words without punctuation or line breaks.
-    - CRITICAL: Double-check that all SKUs exist in the context before including them.
+    - All field values must be strings enclosed in double quotes
+    - SKU must be EXACTLY as it appears in the context (case-sensitive match)
+    - Name and reason must contain only letters, numbers, and spaces (no special characters)
+    - Price must be a valid number as a string (e.g., "29.99")
+    - If the Query SKU product is gendered, recommend products that match the gender
+    - If the Query SKU is gender neutral, recommend gender neutral products
+    - Never mix gendered products (e.g., if viewing women's shoes, don't recommend men's shoes)
+    - Do not conflate pet products with baby products
+    - Return items MUST exist in the provided context - verify each SKU exists
+    - Return items must NOT exist in the cart
+    - NO duplicates - each SKU must be unique in your response
+    - Product matching Query SKU must NOT be included in recommendations
+    - Return items ordered by relevance (best recommendation first)
+    - Each reason must be a single sentence explaining why the product is a good recommendation
+    - Reason should use only plain words without punctuation or line breaks
+    - CRITICAL: Double-check that all SKUs exist in the context before including them
+    - CRITICAL: Ensure you return exactly {self.num_recs} items - count them before responding
 
     Example format:
     
