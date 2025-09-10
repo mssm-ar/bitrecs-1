@@ -158,25 +158,28 @@ class PromptFactory:
     {self.context}
     </context>   
 
-    # OUTPUT REQUIREMENTS
-    - Return ONLY a JSON array.
+    # CRITICAL OUTPUT REQUIREMENTS
+    - Return ONLY a valid JSON array with exactly {self.num_recs} items.
     - NO Python dictionary syntax (no single quotes).
-    - Each item must be valid JSON with: "sku": "...", "name": "...", "price": "...", "reason": "..."
-    - Each item must have: sku, name, price and reason.
-    - If the Query SKU product is gendered consider recommending products that match the gender of the Query SKU.
-    - If the Query SKU is gender neutral recommend more gender neutral products.
-    - Never mix gendered products in the recommendation set for example if the user is looking at womans shoes, do not recommend mens shoes.
-    - Do not conflate pet products with baby products, they are different categories.
-    - Must return exactly {self.num_recs} items.
-    - Return items MUST exist in context.
+    - NO explanations, text, or formatting outside the JSON array.
+    - Each item must be valid JSON with EXACTLY these fields: "sku", "name", "price", "reason"
+    - All field values must be strings (use double quotes).
+    - SKU must be EXACTLY as it appears in the context (case-sensitive).
+    - Name and reason must contain only letters, numbers, and spaces (no special characters).
+    - Price must be a valid number as a string.
+    - If the Query SKU product is gendered, recommend products that match the gender.
+    - If the Query SKU is gender neutral, recommend gender neutral products.
+    - Never mix gendered products (e.g., if viewing women's shoes, don't recommend men's shoes).
+    - Do not conflate pet products with baby products.
+    - Must return EXACTLY {self.num_recs} items - no more, no less.
+    - Return items MUST exist in the provided context.
     - Return items must NOT exist in the cart.
-    - No duplicates. *Very important* The final result MUST be a unique set of products from the context.
-    - Product matching Query SKU must not be included in the set of recommendations.
-    - Return items should be ordered by relevance/profitability, the first being your top recommendation.
-    - Each item must have a reason explaining why the product is a good recommendation for the related Query SKU.
-    - The reason should be a single succinct sentence consisting of plain words without punctuation, or line breaks.
-    - You will be graded on your reason so make sure to provide a good reason for each recommendation which is relevant to the Query SKU.    
-    - No explanations or text outside the JSON array.
+    - NO duplicates - each SKU must be unique.
+    - Product matching Query SKU must NOT be included in recommendations.
+    - Return items ordered by relevance (best recommendation first).
+    - Each reason must be a single sentence explaining why the product is a good recommendation.
+    - Reason should use only plain words without punctuation or line breaks.
+    - CRITICAL: Double-check that all SKUs exist in the context before including them.
 
     Example format:
     
@@ -220,25 +223,62 @@ class PromptFactory:
     @staticmethod
     def tryparse_llm(input_str: str) -> list:
         """
-        Take raw LLM output and parse to an array 
+        Take raw LLM output and parse to an array with robust error handling
 
         """
         try:
-            if not input_str:
+            if not input_str or not input_str.strip():
                 bt.logging.error("Empty input string tryparse_llm")   
                 return []
-            input_str = input_str.replace("```json", "").replace("```", "").strip()
-            pattern = r'\[.*?\]'
-            regex = re.compile(pattern, re.DOTALL)
-            match = regex.findall(input_str)        
-            for array in match:
-                try:
-                    llm_result = array.strip()
-                    return json.loads(llm_result)
-                except json.JSONDecodeError:                    
-                    bt.logging.error(f"Invalid JSON in prompt factory: {array}")
+            
+            # Clean up the input string
+            cleaned_input = input_str.strip()
+            
+            # Remove common markdown formatting
+            cleaned_input = cleaned_input.replace("```json", "").replace("```", "").strip()
+            
+            # Try to find JSON array patterns
+            patterns = [
+                r'\[.*?\]',  # Standard array pattern
+                r'\[[\s\S]*?\]',  # Array with newlines
+            ]
+            
+            for pattern in patterns:
+                regex = re.compile(pattern, re.DOTALL)
+                matches = regex.findall(cleaned_input)
+                
+                for match in matches:
+                    try:
+                        # Try to parse the JSON
+                        parsed_result = json.loads(match.strip())
+                        
+                        # Validate it's a list
+                        if isinstance(parsed_result, list):
+                            bt.logging.info(f"Successfully parsed {len(parsed_result)} recommendations")
+                            return parsed_result
+                        else:
+                            bt.logging.warning(f"Parsed result is not a list: {type(parsed_result)}")
+                            
+                    except json.JSONDecodeError as json_error:
+                        bt.logging.warning(f"JSON decode error for pattern {pattern}: {json_error}")
+                        continue
+                    except Exception as parse_error:
+                        bt.logging.warning(f"Parse error for pattern {pattern}: {parse_error}")
+                        continue
+            
+            # If no patterns worked, try to parse the entire input as JSON
+            try:
+                parsed_result = json.loads(cleaned_input)
+                if isinstance(parsed_result, list):
+                    bt.logging.info(f"Successfully parsed entire input as list: {len(parsed_result)} items")
+                    return parsed_result
+            except json.JSONDecodeError:
+                pass
+            
+            bt.logging.error(f"Failed to parse any valid JSON from input: {input_str[:200]}...")
             return []
+            
         except Exception as e:
-            bt.logging.error(str(e))
+            bt.logging.error(f"Unexpected error in tryparse_llm: {e}")
             return []
     

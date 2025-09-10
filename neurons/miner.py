@@ -33,6 +33,7 @@ from typing import List
 from datetime import datetime, timedelta, timezone
 from bitrecs.base.miner import BaseMinerNeuron
 from bitrecs.commerce.user_profile import UserProfile
+from bitrecs.commerce.product import ProductFactory
 from bitrecs.protocol import BitrecsRequest
 from bitrecs.llms.prompt_factory import PromptFactory
 from bitrecs.llms.factory import LLM, LLMFactory
@@ -78,34 +79,67 @@ async def do_work(user_prompt: str,
     bt.logging.info(f"do_work LLM model: {model}")  
     bt.logging.trace(f"do_work profile: {profile}")
 
-    factory = PromptFactory(sku=user_prompt,
-                            context=context, 
-                            num_recs=num_recs,                                                         
-                            debug=debug_prompts,
-                            profile=profile)
-    prompt = factory.generate_prompt()
+    # Validate inputs
+    if not user_prompt or len(user_prompt.strip()) < CONST.MIN_QUERY_LENGTH:
+        bt.logging.error(f"Invalid user_prompt: {user_prompt}")
+        return []
+    
+    if not context or len(context.strip()) < 10:
+        bt.logging.error(f"Invalid context: {context}")
+        return []
+    
+    if num_recs < 1 or num_recs > CONST.MAX_RECS_PER_REQUEST:
+        bt.logging.error(f"Invalid num_recs: {num_recs}")
+        return []
+
     try:
-        llm_response = LLMFactory.query_llm(server=server, 
-                                            model=model, 
-                                            system_prompt=system_prompt, 
-                                            temp=0.0, user_prompt=prompt)
-        if not llm_response or len(llm_response) < 10:
-            bt.logging.error("LLM response is empty.")
+        factory = PromptFactory(sku=user_prompt,
+                                context=context, 
+                                num_recs=num_recs,                                                         
+                                debug=debug_prompts,
+                                profile=profile)
+        prompt = factory.generate_prompt()
+        
+        # Add timeout protection for LLM calls
+        llm_response = None
+        try:
+            llm_response = LLMFactory.query_llm(server=server, 
+                                                model=model, 
+                                                system_prompt=system_prompt, 
+                                                temp=0.0, user_prompt=prompt)
+        except Exception as llm_error:
+            bt.logging.error(f"LLM call failed: {llm_error}")
+            return []
+        
+        if not llm_response or len(llm_response.strip()) < 10:
+            bt.logging.error("LLM response is empty or too short.")
             return []
         
         parsed_recs = PromptFactory.tryparse_llm(llm_response)
         if debug_prompts:
-            bt.logging.trace(f" {llm_response} ")
-            bt.logging.trace(f"LLM response: {parsed_recs}")
+            bt.logging.trace(f"LLM raw response: {llm_response}")
+            bt.logging.trace(f"Parsed recommendations: {parsed_recs}")
 
         # Validate parsed results before returning
         if not parsed_recs or len(parsed_recs) == 0:
             bt.logging.error("No valid recommendations parsed from LLM response")
             return []
+        
+        # Additional validation for parsed results
+        valid_recs = []
+        for rec in parsed_recs:
+            if isinstance(rec, dict) and all(key in rec for key in ['sku', 'name', 'price', 'reason']):
+                valid_recs.append(rec)
+            else:
+                bt.logging.warning(f"Invalid recommendation format: {rec}")
+        
+        if len(valid_recs) == 0:
+            bt.logging.error("No valid recommendations after validation")
+            return []
             
-        return parsed_recs
+        return valid_recs
     except Exception as e:
-        bt.logging.error(f"Error calling LLM: {e}")
+        bt.logging.error(f"Error in do_work: {e}")
         return []
 
 
@@ -242,36 +276,51 @@ class Miner(BaseMinerNeuron):
             et = time.time()
             bt.logging.info(f"{self.model} Query - Elapsed Time: \033[1;32m {et-st} \033[0m")
       
-        #Do some cleanup - schema is validated in the reward function
+        # Parse and validate the catalog to check SKU validity
+        try:
+            catalog_products = ProductFactory.try_parse_context_strict(context)
+            valid_skus = {product.sku.lower() for product in catalog_products}
+            bt.logging.info(f"Catalog contains {len(valid_skus)} valid SKUs")
+        except Exception as e:
+            bt.logging.error(f"Failed to parse catalog: {e}")
+            valid_skus = set()
+
+        # Do comprehensive cleanup and validation
         final_results = []
         seen_skus = set()
-        query_sku_lower = query.lower()
+        query_sku_lower = query.lower().strip()
         
         for item in results:
             try:
-                item_str = str(item)
-                try:
-                    dictionary_item = json.loads(item_str)
-                except json.JSONDecodeError:
-                    repaired = json_repair.repair_json(item_str)
-                    dictionary_item = json.loads(repaired)
+                # Handle both dict and string inputs
+                if isinstance(item, dict):
+                    dictionary_item = item.copy()
+                else:
+                    item_str = str(item)
+                    try:
+                        dictionary_item = json.loads(item_str)
+                    except json.JSONDecodeError:
+                        try:
+                            repaired = json_repair.repair_json(item_str)
+                            dictionary_item = json.loads(repaired)
+                        except Exception as repair_error:
+                            bt.logging.error(f"Failed to repair JSON: {repair_error}, item: {item_str}")
+                            continue
                 
-                # Validate required fields
-                if "sku" not in dictionary_item:
-                    bt.logging.error(f"Item missing 'sku' key: {dictionary_item}")
-                    continue
-                if "name" not in dictionary_item:
-                    bt.logging.error(f"Item missing 'name' key: {dictionary_item}")
-                    continue
-                if "price" not in dictionary_item:
-                    bt.logging.error(f"Item missing 'price' key: {dictionary_item}")
-                    continue
-                if "reason" not in dictionary_item:
-                    bt.logging.error(f"Item missing 'reason' key: {dictionary_item}")
+                # Validate required fields exist and are not empty
+                required_fields = ['sku', 'name', 'price', 'reason']
+                for field in required_fields:
+                    if field not in dictionary_item or not dictionary_item[field]:
+                        bt.logging.error(f"Item missing or empty '{field}' key: {dictionary_item}")
+                        continue
+                
+                # Get and validate SKU
+                sku = str(dictionary_item["sku"]).strip()
+                if not sku:
+                    bt.logging.error(f"Empty SKU in item: {dictionary_item}")
                     continue
                 
                 # Check for duplicate SKUs
-                sku = dictionary_item["sku"]
                 if sku in seen_skus:
                     bt.logging.error(f"Duplicate SKU found: {sku}")
                     continue
@@ -282,41 +331,76 @@ class Miner(BaseMinerNeuron):
                     bt.logging.error(f"Cannot recommend query product itself: {sku}")
                     continue
                 
-                # Clean up the data
-                dictionary_item["name"] = CONST.RE_PRODUCT_NAME.sub("", str(dictionary_item["name"]))
-                dictionary_item["reason"] = CONST.RE_REASON.sub("", str(dictionary_item["reason"]))
+                # Validate SKU exists in catalog (case-insensitive)
+                if valid_skus and sku.lower() not in valid_skus:
+                    bt.logging.error(f"SKU not found in catalog: {sku}")
+                    continue
                 
+                # Clean up the data using regex patterns
+                dictionary_item["name"] = CONST.RE_PRODUCT_NAME.sub("", str(dictionary_item["name"])).strip()
+                dictionary_item["reason"] = CONST.RE_REASON.sub("", str(dictionary_item["reason"])).strip()
+                dictionary_item["price"] = str(dictionary_item["price"]).strip()
+                dictionary_item["sku"] = sku
+                
+                # Ensure cleaned fields are not empty
+                if not dictionary_item["name"] or not dictionary_item["reason"]:
+                    bt.logging.error(f"Empty name or reason after cleaning: {dictionary_item}")
+                    continue
+                
+                # Create properly formatted JSON
                 recommendation = json.dumps(dictionary_item, separators=(',', ':'))
                 final_results.append(recommendation)
+                
             except Exception as e:
-                bt.logging.error(f"Failed to parse LLM result: {item}, error: {e}")
+                bt.logging.error(f"Failed to process item: {item}, error: {e}")
                 continue
 
+        # Critical validation: Must have exactly the requested number of results
         if len(final_results) != num_recs:
-            bt.logging.error(f"Expected {num_recs} results, but got {len(final_results)}")
-            # If we don't have enough valid results, return empty to avoid 0.0 reward
-            if len(final_results) == 0:
-                bt.logging.error("No valid results generated - returning empty response")
-                return BitrecsRequest(
-                    name=synapse.name,
-                    axon=synapse.axon,
-                    dendrite=synapse.dendrite,
-                    created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-                    user="",
-                    num_results=0,
-                    query=synapse.query,
-                    context="[]",
-                    site_key=synapse.site_key,
-                    results=[],
-                    models_used=[self.model],
-                    miner_uid=str(self.uid),
-                    miner_hotkey=self.wallet.hotkey.ss58_address,
-                    miner_signature=""
-                )
+            bt.logging.error(f"CRITICAL: Expected {num_recs} results, but got {len(final_results)}")
+            # Return empty response to avoid 0.0 reward for wrong count
+            return BitrecsRequest(
+                name=synapse.name,
+                axon=synapse.axon,
+                dendrite=synapse.dendrite,
+                created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+                user="",
+                num_results=0,
+                query=synapse.query,
+                context="[]",
+                site_key=synapse.site_key,
+                results=[],
+                models_used=[self.model],
+                miner_uid=str(self.uid),
+                miner_hotkey=self.wallet.hotkey.ss58_address,
+                miner_signature=""
+            )
       
+        # Create the final response with proper validation
         utc_now = datetime.now(timezone.utc)
         created_at = utc_now.strftime("%Y-%m-%dT%H:%M:%S")
-        output_synapse=BitrecsRequest(
+        
+        # Ensure we have exactly the right number of results
+        if len(final_results) != num_recs:
+            bt.logging.error(f"FINAL VALIDATION FAILED: Expected {num_recs}, got {len(final_results)}")
+            return BitrecsRequest(
+                name=synapse.name,
+                axon=synapse.axon,
+                dendrite=synapse.dendrite,
+                created_at=created_at,
+                user="",
+                num_results=0,
+                query=synapse.query,
+                context="[]",
+                site_key=synapse.site_key,
+                results=[],
+                models_used=[self.model],
+                miner_uid=str(self.uid),
+                miner_hotkey=self.wallet.hotkey.ss58_address,
+                miner_signature=""
+            )
+        
+        output_synapse = BitrecsRequest(
             name=synapse.name,
             axon=synapse.axon,
             dendrite=synapse.dendrite,
@@ -332,11 +416,33 @@ class Miner(BaseMinerNeuron):
             miner_hotkey=self.wallet.hotkey.ss58_address,
             miner_signature=""
         )
-        payload_hash = self.sign_response(output_synapse)
-        signature = self.wallet.hotkey.sign(payload_hash)
-        output_synapse.miner_signature = signature.hex()
+        
+        # Generate proper signature
+        try:
+            payload_hash = self.sign_response(output_synapse)
+            signature = self.wallet.hotkey.sign(payload_hash)
+            output_synapse.miner_signature = signature.hex()
+            bt.logging.info(f"Generated signature for {len(final_results)} recommendations")
+        except Exception as sig_error:
+            bt.logging.error(f"Failed to generate signature: {sig_error}")
+            return BitrecsRequest(
+                name=synapse.name,
+                axon=synapse.axon,
+                dendrite=synapse.dendrite,
+                created_at=created_at,
+                user="",
+                num_results=0,
+                query=synapse.query,
+                context="[]",
+                site_key=synapse.site_key,
+                results=[],
+                models_used=[self.model],
+                miner_uid=str(self.uid),
+                miner_hotkey=self.wallet.hotkey.ss58_address,
+                miner_signature=""
+            )
 
-        bt.logging.info(f"MINER {self.uid} FORWARD PASS RESULT -> {output_synapse}")
+        bt.logging.info(f"MINER {self.uid} FORWARD PASS SUCCESS -> {len(final_results)} valid recommendations")
         self.total_request_in_interval += 1
         return output_synapse
     
