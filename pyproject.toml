@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=70.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Bitrecs"
+dynamic = ["version"]
+description = "Product recommendations on Bittensor"
+authors = [
+    {name = "Bitrecs", email = "support@bitrecs.ai"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    "bittensor==9.9.0",
+    "bittensor-cli==9.10.1",
+    "substrate-interface==1.7.11",
+    "cryptography==45.0.4",
+    "starlette==0.37.2",
+    "pydantic==2.10.4",
+    "numpy==2.0.2",
+    "python-dotenv==1.0.1",
+    "openai==1.93.0",
+    "pandas==2.2.3",
+    "json-repair==0.47.6",
+    "jsonschema==4.24.0",
+    "wandb==0.20.1",
+    "tiktoken==0.9.0",
+    "slowapi==0.1.9"
+]
+
+[project.urls]
+homepage = "https://bitrecs.ai"
+repository = "https://github.com/bitrecs/bitrecs-subnet"
+documentation = "https://github.com/bitrecs/bitrecs-subnet#readme"
+issues = "https://github.com/bitrecs/bitrecs-subnet/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio",
+    "black",
+    "isort",
+]
+
+test = [
+    "pytest==8.3.4",
+    "pytest-asyncio",
+    "pytest-cov",
+]
+
+[tool.setuptools]
+packages = ["bitrecs"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "bitrecs.__version__"}
+
+[tool.black]
+line-length = 100
+target-version = ['py311', 'py312']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
