@@ -108,26 +108,69 @@ class PromptFactory:
         season = self.season
         persona_data = self.PERSONAS[self.persona]
 
-        # SPEED-OPTIMIZED PROMPT - Concise for 512 token limit
-        prompt = f"""Recommend {self.num_recs} {self.engine_mode} products for SKU {self.sku} ({self.sku_info}).
+        # SMART PROMPT - Quality + Speed with context-aware optimization
+        # Use detailed prompt if context is small, concise if large
+        context_length = len(self.context)
+        cart_length = len(self.cart_json)
+        
+        if context_length < 5000 and cart_length < 1000:
+            # DETAILED PROMPT for small contexts (better quality)
+            prompt = f"""# E-COMMERCE RECOMMENDATION TASK
 
-Persona: {self.persona} - {persona_data['description'][:100]}...
+You are a {self.persona} with expertise in {persona_data['description'][:100]}.
+Your core values: {', '.join(persona_data['priorities'])}
 
-Cart: {self.cart_json}
+SCENARIO: Customer viewing SKU {self.sku} ({self.sku_info}) looking for {self.engine_mode} products.
+Season: {self.season} | Date: {today}
 
-Products: {self.context}
+CURRENT CART: {self.cart_json}
 
-REQUIREMENTS:
-- Return ONLY JSON array with EXACTLY {self.num_recs} items
+AVAILABLE PRODUCTS: {self.context}
+
+TASK: Recommend EXACTLY {self.num_recs} complementary products that:
+- Match query product's category and gender
+- Increase average order value and conversion
+- Consider seasonal relevance and user preferences
+- Avoid duplicates and the query product itself
+- Are ordered by relevance (best first)
+
+CRITICAL REQUIREMENTS:
+- Return ONLY valid JSON array with EXACTLY {self.num_recs} items
 - Each item: {{"sku": "...", "name": "...", "price": "...", "reason": "..."}}
-- SKU must exist in products list
-- No duplicates, no query SKU
-- Use double quotes only
+- SKU must exist in products list (case-sensitive match)
+- No duplicates, no query SKU, use double quotes only
+- Reason should explain why it's a good recommendation
 
-Example: [{{"sku": "ABC", "name": "Product Name", "price": "29.99", "reason": "Good match for user needs"}}]"""
+Example: [{{"sku": "ABC123", "name": "Product Name", "price": "29.99", "reason": "Perfect complement for user needs"}}]"""
+        else:
+            # CONCISE PROMPT for large contexts (faster processing)
+            prompt = f"""You are a {self.persona} recommending {self.num_recs} {self.engine_mode} products for SKU {self.sku} ({self.sku_info}).
+
+PERSONA: {persona_data['description'][:80]}...
+VALUES: {', '.join(persona_data['priorities'][:3])}
+
+CART: {self.cart_json}
+
+PRODUCTS: {self.context}
+
+TASK: Select {self.num_recs} complementary products that:
+- Match the query product's category/gender
+- Increase order value and conversion
+- Are relevant to current season ({self.season})
+- Avoid duplicates and query product
+
+OUTPUT FORMAT:
+- Return ONLY valid JSON array with EXACTLY {self.num_recs} items
+- Each item: {{"sku": "...", "name": "...", "price": "...", "reason": "..."}}
+- SKU must exist in products list (case-sensitive)
+- No duplicates, no query SKU, use double quotes only
+- Order by relevance (best first)
+
+Example: [{{"sku": "ABC123", "name": "Product Name", "price": "29.99", "reason": "Perfect complement for user needs"}}]"""
 
         prompt_length = len(prompt)
-        bt.logging.info(f"LLM QUERY Prompt length: {prompt_length}")
+        prompt_type = "DETAILED" if context_length < 5000 and cart_length < 1000 else "CONCISE"
+        bt.logging.info(f"LLM QUERY Prompt: {prompt_type} ({prompt_length} chars, context: {context_length}, cart: {cart_length})")
         
         if self.debug:
             token_count = PromptFactory.get_token_count(prompt)
