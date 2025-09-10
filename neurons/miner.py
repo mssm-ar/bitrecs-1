@@ -100,15 +100,25 @@ async def do_work(user_prompt: str,
                                 profile=profile)
         prompt = factory.generate_prompt()
         
-        # Add timeout protection for LLM calls
+        # SPEED OPTIMIZATION: Add timeout protection and fast processing
         llm_response = None
+        start_time = time.time()
+        
         try:
+            # Use optimized settings for speed
             llm_response = LLMFactory.query_llm(server=server, 
                                                 model=model, 
                                                 system_prompt=system_prompt, 
                                                 temp=0.0, user_prompt=prompt)
+            
+            # Check if we're approaching timeout (2.5 seconds)
+            elapsed = time.time() - start_time
+            if elapsed > 2.5:
+                bt.logging.warning(f"LLM call took {elapsed:.2f}s - approaching timeout")
+                
         except Exception as llm_error:
-            bt.logging.error(f"LLM call failed: {llm_error}")
+            elapsed = time.time() - start_time
+            bt.logging.error(f"LLM call failed after {elapsed:.2f}s: {llm_error}")
             return []
         
         if not llm_response or len(llm_response.strip()) < 10:
@@ -214,17 +224,29 @@ class Miner(BaseMinerNeuron):
         """
         bt.logging.info(f"MINER {self.uid} FORWARD PASS {synapse.query}")
 
+        # SPEED OPTIMIZATION: Start timing immediately
+        st = time.time()
+        timeout_threshold = 2.8  # Leave 0.2s buffer for response creation
+        
         results = []
         query = synapse.query
         context = synapse.context
         num_recs = synapse.num_results
         model = self.model
         server = self.llm_provider        
-        st = time.time()
         debug_prompts = self.config.logging.trace
         user_profile = UserProfile.tryparse_profile(synapse.user)
+        
+        # Check if we're already approaching timeout
+        if time.time() - st > 0.5:
+            bt.logging.warning("Request processing already taking too long")
 
         try:
+            # Check timeout before LLM call
+            if time.time() - st > timeout_threshold:
+                bt.logging.error("TIMEOUT: Approaching 3s limit before LLM call")
+                return self._create_empty_response(synapse, "timeout_before_llm")
+            
             results = await do_work(user_prompt=query,
                                     context=context, 
                                     num_recs=num_recs, 
@@ -232,51 +254,32 @@ class Miner(BaseMinerNeuron):
                                     model=model, 
                                     profile=user_profile,
                                     debug_prompts=debug_prompts)            
-            bt.logging.info(f"LLM {self.model} - Results: count ({len(results)})")
+            
+            # Check timeout after LLM call
+            elapsed = time.time() - st
+            bt.logging.info(f"LLM {self.model} - Results: count ({len(results)}) in {elapsed:.2f}s")
+            
+            if elapsed > timeout_threshold:
+                bt.logging.error(f"TIMEOUT: LLM call took {elapsed:.2f}s - approaching limit")
+                return self._create_empty_response(synapse, "timeout_after_llm")
             
             # If no results, return early to avoid processing
             if not results or len(results) == 0:
                 bt.logging.error("No results from do_work - returning empty response")
-                return BitrecsRequest(
-                    name=synapse.name,
-                    axon=synapse.axon,
-                    dendrite=synapse.dendrite,
-                    created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-                    user="",
-                    num_results=0,
-                    query=synapse.query,
-                    context="[]",
-                    site_key=synapse.site_key,
-                    results=[],
-                    models_used=[self.model],
-                    miner_uid=str(self.uid),
-                    miner_hotkey=self.wallet.hotkey.ss58_address,
-                    miner_signature=""
-                )
+                return self._create_empty_response(synapse, "no_results")
         except Exception as e:
-            bt.logging.error(f"\033[31mFATAL ERROR calling do_work: {e!r} \033[0m")
-            # Return empty response on fatal error
-            return BitrecsRequest(
-                name=synapse.name,
-                axon=synapse.axon,
-                dendrite=synapse.dendrite,
-                created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-                user="",
-                num_results=0,
-                query=synapse.query,
-                context="[]",
-                site_key=synapse.site_key,
-                results=[],
-                models_used=[self.model],
-                miner_uid=str(self.uid),
-                miner_hotkey=self.wallet.hotkey.ss58_address,
-                miner_signature=""
-            )
+            elapsed = time.time() - st
+            bt.logging.error(f"\033[31mFATAL ERROR calling do_work after {elapsed:.2f}s: {e!r} \033[0m")
+            return self._create_empty_response(synapse, "fatal_error")
         finally:
             et = time.time()
             bt.logging.info(f"{self.model} Query - Elapsed Time: \033[1;32m {et-st} \033[0m")
       
-        # Parse and validate the catalog to check SKU validity
+        # SPEED OPTIMIZATION: Fast catalog parsing with timeout check
+        if time.time() - st > timeout_threshold:
+            bt.logging.error("TIMEOUT: Approaching limit before validation")
+            return self._create_empty_response(synapse, "timeout_before_validation")
+        
         try:
             catalog_products = ProductFactory.try_parse_context_strict(context)
             valid_skus = {product.sku.lower() for product in catalog_products}
@@ -285,13 +288,18 @@ class Miner(BaseMinerNeuron):
             bt.logging.error(f"Failed to parse catalog: {e}")
             valid_skus = set()
 
-        # STEP 1: VALID JSON FORMAT - Ensure proper JSON array structure
-        bt.logging.info(f"STEP 1: Validating JSON format for {len(results)} items")
+        # SPEED OPTIMIZATION: Fast validation with timeout checks
+        bt.logging.info(f"SPEED VALIDATION: Processing {len(results)} items")
         final_results = []
         seen_skus = set()
         query_sku_lower = query.lower().strip()
         
+        # Process items with timeout protection
         for i, item in enumerate(results):
+            # Check timeout every 10 items
+            if i % 10 == 0 and time.time() - st > timeout_threshold:
+                bt.logging.error(f"TIMEOUT: Processing item {i} - approaching limit")
+                return self._create_empty_response(synapse, "timeout_during_validation")
             try:
                 # Handle both dict and string inputs with robust JSON validation
                 if isinstance(item, dict):
@@ -317,17 +325,20 @@ class Miner(BaseMinerNeuron):
                         except Exception as repair_error:
                             bt.logging.warning(f"Item {i}: JSON repair failed: {repair_error}")
                             
-                            # Strategy 3: Extract JSON from text
+                            # Strategy 3: Fast pattern extraction (simplified for speed)
                             try:
-                                # Look for JSON array patterns
                                 import re
+                                # Simplified pattern for speed
                                 json_pattern = r'\{[^{}]*"sku"[^{}]*\}'
                                 matches = re.findall(json_pattern, item_str)
                                 if matches:
                                     dictionary_item = json.loads(matches[0])
-                                    bt.logging.trace(f"Item {i}: Pattern extraction successful")
+                                    bt.logging.trace(f"Item {i}: Fast pattern extraction successful")
+                                else:
+                                    bt.logging.warning(f"Item {i}: No JSON pattern found, skipping")
+                                    continue
                             except Exception as pattern_error:
-                                bt.logging.error(f"Item {i}: All JSON parsing strategies failed: {pattern_error}")
+                                bt.logging.warning(f"Item {i}: Pattern extraction failed: {pattern_error}")
                                 continue
                     
                     if dictionary_item is None:
@@ -665,6 +676,25 @@ class Miner(BaseMinerNeuron):
         )
         return priority
     
+    def _create_empty_response(self, synapse: BitrecsRequest, reason: str) -> BitrecsRequest:
+        """Create empty response quickly to avoid timeout"""
+        bt.logging.info(f"Creating empty response due to: {reason}")
+        return BitrecsRequest(
+            name=synapse.name,
+            axon=synapse.axon,
+            dendrite=synapse.dendrite,
+            created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            user="",
+            num_results=0,
+            query=synapse.query,
+            context="[]",
+            site_key=synapse.site_key,
+            results=[],
+            models_used=[self.model],
+            miner_uid=str(self.uid),
+            miner_hotkey=self.wallet.hotkey.ss58_address,
+            miner_signature=""
+        )
     
     def save_state(self):
         pass

@@ -31,7 +31,8 @@ class vLLM:
                 {"role": "user", "content": user_prompt}
             ],
             temperature=self.temp,
-            max_tokens=2048
+            max_tokens=512,  # SPEED OPTIMIZATION: Reduced from 2048 to 512
+            timeout=3  # SPEED OPTIMIZATION: Add timeout
         )
         #print(completion.choices[0].message.content)
         result = completion.choices[0].message.content
